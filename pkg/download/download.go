@@ -10,15 +10,23 @@ import (
 
 const (
 	bufSize  = 32 * 1024 // 32KB буфер для потоковой записи
-	retryMax = 3
+	retryMax = 3         // количество попыток при ошибке сети
 )
 
 type progressFn func(downloaded, total int64)
 
+// DownloadModel скачивает GGUF файл с Hugging Face Hub в кэш-директорию.
+// repoID: "TheBloke/CodeLlama-7B-GGUF"
+// filename: "codellama-7b.Q4_K_M.gguf"
+// cacheDir: если пусто, используется $HOME/.cache/iollama/models
+// Возвращает путь к скачанному файлу.
 func DownloadModel(repoID, filename, cacheDir string) (string, error) {
 	return DownloadModelWithProgress(repoID, filename, cacheDir, nil)
 }
 
+// DownloadModelWithProgress скачивает GGUF файл с поддержкой коллбэка прогресса.
+// onProgress: вызывается после каждого чтения буфера с текущим прогрессом.
+// Параметры onProgress: (скачано байт, всего байт, -1 если неизвестно).
 func DownloadModelWithProgress(repoID, filename, cacheDir string, onProgress progressFn) (string, error) {
 	if cacheDir == "" {
 		home, err := os.UserHomeDir()
@@ -44,6 +52,7 @@ func DownloadModelWithProgress(repoID, filename, cacheDir string, onProgress pro
 	return downloadWithRetry(url, localPath, onProgress, retryMax)
 }
 
+// downloadWithRetry выполняет загрузку с повторными попытками при ошибках сети.
 func downloadWithRetry(url, localPath string, onProgress progressFn, retries int) (string, error) {
 	var lastErr error
 	for i := 0; i < retries; i++ {
@@ -56,6 +65,7 @@ func downloadWithRetry(url, localPath string, onProgress progressFn, retries int
 	return "", fmt.Errorf("download failed after %d attempts: %w", retries, lastErr)
 }
 
+// downloadFile выполняет потоковую загрузку файла с буферизацией по частям.
 func downloadFile(url, localPath string, onProgress progressFn) error {
 	resp, err := http.Get(url)
 	if err != nil {
@@ -100,6 +110,9 @@ func downloadFile(url, localPath string, onProgress progressFn) error {
 	return nil
 }
 
+// ParseHFURL парсит URL Hugging Face и извлекает repoID и имя файла.
+// Пример: "https://huggingface.co/TheBloke/CodeLlama-7B-GGUF/resolve/main/codellama-7b.Q4_K_M.gguf"
+// Возвращает (repoID, filename, ok).
 func ParseHFURL(url string) (repoID, filename string, isOk bool) {
 	parts := strings.Split(url, "/")
 	if len(parts) < 2 {
