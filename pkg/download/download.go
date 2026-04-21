@@ -2,17 +2,24 @@ package download
 
 import (
 	"fmt"
-	"io"
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
-// DownloadModel скачивает GGUF файл с Hugging Face Hub в кэш-директорию.
-// repoID: "TheBloke/CodeLlama-7B-GGUF"
-// filename: "codellama-7b.Q4_K_M.gguf"
-// cacheDir: если пусто, используется $HOME/.cache/iollama/models
+const (
+	bufSize  = 32 * 1024 // 32KB буфер для потоковой записи
+	retryMax = 3
+)
+
+type progressFn func(downloaded, total int64)
+
 func DownloadModel(repoID, filename, cacheDir string) (string, error) {
+	return DownloadModelWithProgress(repoID, filename, cacheDir, nil)
+}
+
+func DownloadModelWithProgress(repoID, filename, cacheDir string, onProgress progressFn) (string, error) {
 	if cacheDir == "" {
 		home, err := os.UserHomeDir()
 		if err != nil {
@@ -25,8 +32,8 @@ func DownloadModel(repoID, filename, cacheDir string) (string, error) {
 	}
 	localPath := filepath.Join(cacheDir, filename)
 
-	// Проверяем, есть ли уже файл
-	if _, err := os.Stat(localPath); err == nil {
+	stat, err := os.Stat(localPath)
+	if err == nil && stat.Size() > 0 {
 		fmt.Fprintf(os.Stderr, "Model already exists at %s, skipping download.\n", localPath)
 		return localPath, nil
 	}
@@ -34,29 +41,71 @@ func DownloadModel(repoID, filename, cacheDir string) (string, error) {
 	url := fmt.Sprintf("https://huggingface.co/%s/resolve/main/%s", repoID, filename)
 	fmt.Fprintf(os.Stderr, "Downloading %s ...\n", url)
 
+	return downloadWithRetry(url, localPath, onProgress, retryMax)
+}
+
+func downloadWithRetry(url, localPath string, onProgress progressFn, retries int) (string, error) {
+	var lastErr error
+	for i := 0; i < retries; i++ {
+		lastErr = downloadFile(url, localPath, onProgress)
+		if lastErr == nil {
+			return localPath, nil
+		}
+		fmt.Fprintf(os.Stderr, "Download failed (attempt %d/%d): %v\n", i+1, retries, lastErr)
+	}
+	return "", fmt.Errorf("download failed after %d attempts: %w", retries, lastErr)
+}
+
+func downloadFile(url, localPath string, onProgress progressFn) error {
 	resp, err := http.Get(url)
 	if err != nil {
-		return "", err
+		return err
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("failed to download: %s", resp.Status)
+		return fmt.Errorf("failed to download: %s", resp.Status)
 	}
+
+	total := resp.ContentLength
+	downloaded := int64(0)
 
 	out, err := os.Create(localPath)
 	if err != nil {
-		return "", err
+		return err
 	}
 	defer out.Close()
 
-	// Прогресс в stderr (можно улучшить)
-	_, err = io.Copy(out, resp.Body)
-	if err != nil {
-		return "", err
+	buf := make([]byte, bufSize)
+	for {
+		n, rerr := resp.Body.Read(buf)
+		if n > 0 {
+			if _, werr := out.Write(buf[:n]); werr != nil {
+				return werr
+			}
+			downloaded += int64(n)
+			if onProgress != nil {
+				onProgress(downloaded, total)
+			}
+		}
+		if rerr != nil {
+			if rerr.Error() == "EOF" {
+				break
+			}
+			return rerr
+		}
 	}
 
 	fmt.Fprintf(os.Stderr, "Saved to %s\n", localPath)
-	return localPath, nil
+	return nil
 }
 
+func ParseHFURL(url string) (repoID, filename string, isOk bool) {
+	parts := strings.Split(url, "/")
+	if len(parts) < 2 {
+		return "", "", false
+	}
+	repoID = strings.Join(parts[:len(parts)-2], "/")
+	filename = parts[len(parts)-1]
+	return repoID, filename, true
+}
